@@ -1,6 +1,6 @@
 'use client';
 
-import React from 'react';
+import * as React from 'react';
 import StreamsTable from '@/app/str-aux/StreamTable';
 
 function pretty(n: number | undefined | null, digits = 6) {
@@ -14,80 +14,104 @@ function prettyPct(n: number | undefined | null, digits = 2) {
   return Math.abs(v) >= 1e-6 ? v.toFixed(digits) : v.toExponential(2);
 }
 
+type Nucleus = { binIndex: number };
+type FM = {
+  // legacy
+  gfm_price?: number;
+  // new
+  gfm_ref_price?: number;   // GFMr (anchor)
+  gfm_calc_price?: number;  // GFMc (live)
+  sigma?: number; zAbs?: number;
+  vInner?: number; vOuter?: number;
+  inertia?: number; disruption?: number;
+  nuclei?: Nucleus[];
+};
+type Streams = {
+  benchmark?: { prev: number; cur: number; greatest: number };
+  pct24h?:    { prev: number; cur: number; greatest: number };
+  pct_drv?:   { prev: number; cur: number; greatest: number };
+};
+type Shifts =
+  | { nShifts: number; timelapseSec: number; latestTs: number }
+  | number
+  | undefined;
+
+type CoinOut = {
+  ok?: boolean;
+  meta?: { uiEpoch?: number; [k: string]: any };
+  n?: number; bins?: number;
+  opening?: number;
+  openingSet?: { benchmark: number; openingTs: number };
+  sessionStats?: { priceMin: number; priceMax: number; benchPctMin: number; benchPctMax: number };
+  stats?: { minPrice: number; maxPrice: number };
+  fm?: FM;
+  swaps?: number;
+  shifts?: Shifts;
+  shiftsBlock?: Shifts;
+  shiftsLegacy?: Shifts;
+  gfmDelta?: { absPct?: number; anchorPrice?: number | null; price?: number | null };
+  shift_stamp?: boolean;
+  streams?: Streams;
+  hist?: { counts: number[] };
+  lastUpdateTs?: number;
+  [k: string]: any;
+};
+
 export default function CoinPanel({
   symbol,
   coin,
   histogram,
 }: {
   symbol: string;
-  coin?: {
-    ok?: boolean;
-    n?: number;
-    bins?: number;
-
-    opening?: number;
-    openingSet?: { benchmark: number; openingTs: number };
-
-    sessionStats?: { priceMin: number; priceMax: number; benchPctMin: number; benchPctMax: number };
-    stats?: { minPrice: number; maxPrice: number }; // legacy alias
-
-    fm?: {
-      gfm_r: number;
-      gfm_price: number;
-      sigma: number;
-      zAbs: number;
-      vInner: number;
-      vOuter: number;
-      inertia: number;
-      disruption: number;
-      nuclei?: { binIndex: number }[];
-    };
-
-    swaps?: number;
-    shifts?: { nShifts: number; timelapseSec: number; latestTs: number };
-    shiftsBlock?: { nShifts: number; timelapseSec: number; latestTs: number };
-    shiftsLegacy?: { nShifts: number; timelapseSec: number; latestTs: number };
-
-    // from API
-    gfmDelta?: { absPct?: number; anchorPrice?: number | null; price?: number };
-    shift_stamp?: boolean;
-
-    streams?: {
-      benchmark?: { prev: number; cur: number; greatest: number }; // price
-      pct24h?: { prev: number; cur: number; greatest: number };    // %
-      pct_drv?: { prev: number; cur: number; greatest: number };   // %
-    };
-
-    hist?: { counts: number[] };
-    lastUpdateTs?: number;
-  } | null;
+  coin?: CoinOut | null;
   histogram?: React.ReactNode;
 }) {
-  const ok = !!coin?.ok;
-  const openingVal = coin?.opening ?? coin?.openingSet?.benchmark;
-  const minPrice = coin?.sessionStats?.priceMin ?? coin?.stats?.minPrice;
-  const maxPrice = coin?.sessionStats?.priceMax ?? coin?.stats?.maxPrice;
-  const shifts = coin?.shifts ?? coin?.shiftsBlock ?? coin?.shiftsLegacy;
-  const latest = (shifts?.latestTs ?? coin?.lastUpdateTs)
-    ? new Date((shifts?.latestTs ?? coin?.lastUpdateTs)!).toLocaleTimeString()
-    : '—';
+  // -------- epoch-gated freeze (adopt data only when uiEpoch changes) --------
+  const epoch = coin?.meta?.uiEpoch ?? 0;
+  const lastEpochRef = React.useRef<number>(-1);
+  const [frozen, setFrozen] = React.useState<CoinOut | null>(null);
 
-  // GFM delta parts
-  const anchorPrice = coin?.gfmDelta?.anchorPrice ?? null;
+  React.useEffect(() => {
+    if (!coin) return;
+    if (epoch !== lastEpochRef.current) {
+      setFrozen(coin);
+      lastEpochRef.current = epoch;
+    }
+  }, [coin, epoch]);
+
+  // Render snapshot for shift-sensitive tiles; keep delta live from latest 'coin'
+  const render = frozen ?? coin ?? undefined;
+
+  const ok = !!render?.ok;
+  const openingVal = render?.opening ?? render?.openingSet?.benchmark;
+  const minPrice = render?.sessionStats?.priceMin ?? render?.stats?.minPrice;
+  const maxPrice = render?.sessionStats?.priceMax ?? render?.stats?.maxPrice;
+
+  // unify shifts count and latestTs
+  const shiftsBag = (render?.shifts ?? render?.shiftsBlock ?? render?.shiftsLegacy) as any;
+  const shiftsCount = typeof shiftsBag === 'number' ? shiftsBag : shiftsBag?.nShifts;
+  const latestTs = (shiftsBag?.latestTs ?? coin?.lastUpdateTs) as number | undefined;
+  const latest = latestTs ? new Date(latestTs).toLocaleTimeString() : '—';
+
+  // ------------------------------ GFM block ------------------------------
+  // Anchor (GFMr) is from frozen snapshot; GFMc only for debug/fallback
+  const gfmr = render?.fm?.gfm_ref_price ?? render?.fm?.gfm_price ?? null;
+  const gfmc = coin?.fm?.gfm_calc_price ?? coin?.fm?.gfm_price ?? null;
+  const gfmMain = gfmr ?? gfmc ?? null;
+
+  // Delta uses latest price vs anchor (so it keeps ticking without unfreezing)
+  const anchorForDelta = gfmr ?? render?.gfmDelta?.anchorPrice ?? null;
   const livePrice = coin?.gfmDelta?.price ?? null;
-  const deltaAbsPrice =
-    anchorPrice !== null && livePrice !== null ? Math.abs(livePrice - anchorPrice) : null;
   const deltaAbsPct = coin?.gfmDelta?.absPct ?? null;
+  const deltaAbsPrice =
+    anchorForDelta !== null && livePrice !== null ? Math.abs(livePrice - anchorForDelta) : null;
 
-  // Build the tiny subline: "GFMΔ = 1000 (0.03%)"
   const gfmSub =
-    deltaAbsPrice !== null && deltaAbsPct !== null
-      ? (
-          <div className="mt-0.5 text-[10px] leading-tight text-[var(--muted)]">
-            GFMΔ = {pretty(deltaAbsPrice, 6)} ({prettyPct(deltaAbsPct, 2)}%)
-          </div>
-        )
-      : null;
+    deltaAbsPrice !== null && deltaAbsPct !== null ? (
+      <div className="mt-0.5 text-[10px] leading-tight text-[var(--muted)]">
+        GFMΔ = {pretty(deltaAbsPrice, 6)} ({prettyPct(deltaAbsPct, 2)}%)
+      </div>
+    ) : null;
 
   return (
     <div className="rounded-2xl border border-[var(--border)] bg-[var(--panel)] shadow-[0_0_0_1px_rgba(255,255,255,0.02)_inset] p-4">
@@ -97,12 +121,17 @@ export default function CoinPanel({
           <span className="px-2 py-1 rounded-md text-xs font-semibold bg-[var(--panel-2)] border border-[var(--border)]">
             {symbol}
           </span>
-          <span className="text-xs text-[var(--muted)]">n={coin?.n ?? '—'} · bins={coin?.bins ?? '—'}</span>
+          <span className="text-xs text-[var(--muted)]">
+            n={render?.n ?? '—'} · bins={render?.bins ?? '—'}
+          </span>
         </div>
         <div className="flex items-center gap-2 text-xs text-[var(--muted)]">
+          <span>epoch #{epoch}</span>
           <span>updated {latest}</span>
           {coin?.shift_stamp ? (
-            <span className="px-1.5 py-0.5 rounded-md bg-emerald-500/15 text-emerald-300 border border-emerald-400/30 font-medium">SHIFT</span>
+            <span className="px-1.5 py-0.5 rounded-md bg-emerald-500/15 text-emerald-300 border border-emerald-400/30 font-medium">
+              SHIFT
+            </span>
           ) : null}
         </div>
       </div>
@@ -113,9 +142,9 @@ export default function CoinPanel({
         <>
           {/* top metric row */}
           <div className="grid grid-cols-4 gap-3 mb-3">
-            <Metric label="GFM" value={pretty(coin?.fm?.gfm_price)} accent="violet" sub={gfmSub} />
-            <Metric label="σ" value={pretty(coin?.fm?.sigma)} accent="cyan" />
-            <Metric label="|z|" value={pretty(coin?.fm?.zAbs)} accent="pink" />
+            <Metric label="GFM" value={pretty(gfmMain)} accent="violet" sub={gfmSub} />
+            <Metric label="σ" value={pretty(render?.fm?.sigma)} accent="cyan" />
+            <Metric label="|z|" value={pretty(render?.fm?.zAbs)} accent="pink" />
             <Metric label="opening" value={pretty(openingVal)} accent="lime" />
           </div>
 
@@ -138,11 +167,15 @@ export default function CoinPanel({
             <Card title="Shifts" subtitle="confirmed K-cycles">
               <div className="text-sm grid grid-cols-2 gap-x-3">
                 <div className="text-[var(--muted)]">nShifts</div>
-                <div className="tabular-nums">{shifts?.nShifts ?? '—'}</div>
+                <div className="tabular-nums">{shiftsCount ?? '—'}</div>
                 <div className="text-[var(--muted)]">swaps</div>
-                <div className="tabular-nums">{coin?.swaps ?? '—'}</div>
+                <div className="tabular-nums">{render?.swaps ?? '—'}</div>
                 <div className="text-[var(--muted)]">timelapse</div>
-                <div className="tabular-nums">{shifts ? `${shifts.timelapseSec}s` : '—'}</div>
+                <div className="tabular-nums">
+                  {typeof (shiftsBag as any)?.timelapseSec === 'number'
+                    ? `${(shiftsBag as any).timelapseSec}s`
+                    : '—'}
+                </div>
               </div>
             </Card>
 
@@ -155,14 +188,14 @@ export default function CoinPanel({
           </div>
 
           {/* streams */}
-          <StreamsTable streams={coin?.streams} />
+          <StreamsTable streams={render?.streams} />
 
           {/* matrix-style detail */}
           <div className="mt-3 grid grid-cols-3 gap-y-1 text-sm">
-            <Row k="vInner" v={pretty(coin?.fm?.vInner, 2)} />
-            <Row k="vOuter" v={pretty(coin?.fm?.vOuter, 2)} />
-            <Row k="inertia" v={pretty(coin?.fm?.inertia, 3)} />
-            <Row k="disruption" v={pretty(coin?.fm?.disruption, 3)} />
+            <Row k="vInner" v={pretty(render?.fm?.vInner, 2)} />
+            <Row k="vOuter" v={pretty(render?.fm?.vOuter, 2)} />
+            <Row k="inertia" v={pretty(render?.fm?.inertia, 3)} />
+            <Row k="disruption" v={pretty(render?.fm?.disruption, 3)} />
           </div>
         </>
       )}
@@ -179,7 +212,7 @@ function Metric({
   label: string;
   value: string;
   accent: 'violet' | 'cyan' | 'pink' | 'lime';
-  sub?: React.ReactNode; // 👈 optional tiny subline
+  sub?: React.ReactNode;
 }) {
   const ring =
     accent === 'violet'

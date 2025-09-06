@@ -126,3 +126,64 @@ export type StrategyAuxResult = {
   ohlc?: OhlcBundle;     // attached for UI/DB inspection
   tendencies?: { latestTs: number };
 };
+
+export type Snapshot = {
+  price: number;      // absolute last price at snapshot
+  benchPct: number;   // 24h percentage change at snapshot
+  pctDrv: number;     // derived % (your pct_drv) at snapshot
+  ts: number;         // unix ms timestamp
+};
+
+/**
+ * Persistent per-symbol session state saved to strategy_aux.str_aux_session.
+ * Keep this in sync with sessionDb.ts and your DDL.
+ */
+export type SymbolSession = {
+  // opening & extrema within the current app session
+  openingTs: number;
+  openingPrice: number;
+  priceMin: number;
+  priceMax: number;
+
+  // extrema of the 24h benchmark % seen during the session
+  benchPctMin: number;
+  benchPctMax: number;
+
+  // regime-change counters
+  swaps: number;        // sign changes of benchmark delta
+  shifts: number;       // sustained deviation events (≥ K cycles over epsShiftPct)
+
+  // thresholds / params currently in use
+  etaPct: number;       // e.g. 0.0005 (0.05%) – “swap” epsilon
+  epsShiftPct: number;  // e.g. 0.002 (0.2%) – “shift” epsilon
+  K: number;            // sustained cycles threshold (e.g. 32)
+
+  // “greatest absolute” helpers for quick UI badges
+  greatestBenchAbs: number;
+  greatestDrvAbs: number;
+  greatestPct24hAbs: number;
+
+  // rolling last price for convenience
+  lastPrice: number;
+
+  // UI epoch gate (frontend only updates on change)
+  uiEpoch: number;
+
+  // counts relative to GFMr (used by shift detection)
+  aboveCount: number;
+  belowCount: number;
+
+  // GFM anchors (reference and price where anchored)
+  gfmRefPrice?: number;     // current reference GFM in price space
+  gfmAnchorPrice?: number;  // last anchor price (when GFMr updated)
+
+  // last direction of benchmark (sign of delta)
+  lastBenchSign: number;
+
+  // stream snapshots (previous and current)
+  snapPrev: Snapshot;
+  snapCur: Snapshot;
+
+  // |GFM - price| as percentage of GFMr (absolute)
+  gfmDeltaAbsPct: number;
+};

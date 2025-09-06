@@ -1,4 +1,4 @@
-import type { MarketPoint } from '@/lab/str-aux/types';
+import type { MarketPoint } from '@/str-aux/types';
 const BASE = process.env.BINANCE_BASE_URL ?? 'https://api.binance.com';
 
 export async function fetchKlines(symbol: string, interval: string, limit: number): Promise<MarketPoint[]> {

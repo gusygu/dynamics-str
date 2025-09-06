@@ -1,0 +1,47 @@
+{
+  "meta": {
+    "at": 1757172712078
+  },
+  "schemas": {
+    "strategy_aux": {
+      "tables": [
+        "app_session",
+        "audit_log",
+        "point",
+        "snapshot",
+        "str_aux_doc",
+        "str_aux_snapshot"
+      ],
+      "data": {
+        "app_session": {
+          "count": 0,
+          "sample": []
+        },
+        "audit_log": {
+          "count": 0,
+          "sample": []
+        },
+        "point": {
+          "count": 0,
+          "sample": []
+        },
+        "snapshot": {
+          "count": 0,
+          "sample": []
+        },
+        "str_aux_doc": {
+          "count": 0,
+          "sample": []
+        },
+        "str_aux_snapshot": {
+          "count": 0,
+          "sample": []
+        }
+      }
+    },
+    "matrices_dynamics": {
+      "tables": [],
+      "data": {}
+    }
+  }
+}

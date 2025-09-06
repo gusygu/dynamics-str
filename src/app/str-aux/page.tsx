@@ -8,7 +8,7 @@ import { Inter } from 'next/font/google';
 const inter = Inter({ subsets: ['latin'], variable: '--font-sans' });
 
 type FM = {
-  gfm: number;
+  gfm?: number; // legacy ratio form (not used directly here)
   sigma: number;
   zAbs: number;
   vInner: number;
@@ -33,9 +33,14 @@ type CoinOut = {
   window?: string;
   bins?: number;
   opening?: number;
-  fm?: FM;
+  fm?: FM & {
+    gfm_ref_price?: number;   // GFMr
+    gfm_calc_price?: number;  // GFMc
+    gfm_price?: number;       // legacy fallback
+  };
   hist?: Hist;
   error?: string;
+  [k: string]: any;
 };
 
 type BinsResponse = {
@@ -45,8 +50,9 @@ type BinsResponse = {
   out: Record<string, CoinOut>;
 };
 
-const DEFAULT_COINS = (process.env.NEXT_PUBLIC_COINS ?? 'BTC,ETH,SOL,ADA,BNB,XRP').toUpperCase();
+const DEFAULT_COINS = (process.env.NEXT_PUBLIC_COINS ?? 'BTC ETH SOL ADA BNB XRP').toUpperCase();
 const PAGE_SIZE = 4;
+const REFRESH_MS = 40_000; // 40s
 
 function useBins(coins: string, windowSel: '30m' | '1h' | '3h', auto: boolean) {
   const [data, setData] = useState<BinsResponse | null>(null);
@@ -58,7 +64,7 @@ function useBins(coins: string, windowSel: '30m' | '1h' | '3h', auto: boolean) {
     setLoading(true);
     setErr(null);
     try {
-      const url = `/api/str-aux/bins?coins=${encodeURIComponent(coins)}&window=${windowSel}&bins=128`;
+      const url = `/api/str-aux/bins?coins=${encodeURIComponent(coins)}&window=${windowSel}&bins=128&sessionId=ui`;
       const r = await fetch(url, { cache: 'no-store' });
       const j = (await r.json()) as BinsResponse;
       if (!r.ok || !j.ok) throw new Error((j as any)?.error ?? `HTTP ${r.status}`);
@@ -87,7 +93,7 @@ function useBins(coins: string, windowSel: '30m' | '1h' | '3h', auto: boolean) {
     run();
 
     if (auto) {
-      timer.current = setInterval(run, 15_000);
+      timer.current = setInterval(run, REFRESH_MS);
     }
 
     return () => {
@@ -104,7 +110,11 @@ function useBins(coins: string, windowSel: '30m' | '1h' | '3h', auto: boolean) {
 
 function prettyTs(ts?: number) {
   if (!ts) return '—';
-  try { return new Date(ts).toLocaleString(); } catch { return String(ts); }
+  try {
+    return new Date(ts).toLocaleString();
+  } catch {
+    return String(ts);
+  }
 }
 
 export default function StrAuxPage() {
@@ -116,11 +126,13 @@ export default function StrAuxPage() {
   const { data, loading, err, refetch } = useBins(coins, windowSel, auto);
 
   const symbols = useMemo(() => {
-    if (!data?.symbols?.length) {
-      // derive from input if API hasn't answered yet
-      return coins.split(',').map(s => s.trim().toUpperCase()).filter(Boolean).map(s => `${s}USDT`);
-    }
-    return data.symbols;
+    if (data?.symbols?.length) return data.symbols;
+    // derive from input if API hasn't answered yet (supports commas OR spaces)
+    return coins
+      .split(/[,\s]+/)
+      .map(s => s.trim().toUpperCase())
+      .filter(Boolean)
+      .map(s => (s.endsWith('USDT') ? s : `${s}USDT`));
   }, [data, coins]);
 
   const pageCount = Math.max(1, Math.ceil(symbols.length / PAGE_SIZE));
@@ -139,14 +151,16 @@ export default function StrAuxPage() {
         <header className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
           <div>
             <h1 className="text-2xl font-semibold tracking-tight">Lab · Multi Dash</h1>
-            <p className="text-sm text-[var(--muted)]">Live STR-Aux (IDHR 128) · windowed klines · four panels per page</p>
+            <p className="text-sm text-[var(--muted)]">
+              Live STR-Aux (IDHR 128) · windowed klines · four panels per page
+            </p>
           </div>
           <div className="flex flex-wrap gap-2">
             <input
               className="px-3 py-2 text-sm rounded-xl outline-none bg-[var(--panel-2)] border border-[var(--border)] placeholder:text-[var(--muted)]"
               value={coins}
               onChange={e => setCoins(e.target.value.toUpperCase())}
-              placeholder="BTC,ETH,SOL,ADA"
+              placeholder="BTC ETH SOL ADA"
             />
             <select
               className="px-3 py-2 text-sm rounded-xl bg-[var(--panel-2)] border border-[var(--border)]"
@@ -159,7 +173,7 @@ export default function StrAuxPage() {
             </select>
             <label className="inline-flex items-center gap-2 text-sm px-3 py-2 rounded-xl bg-[var(--panel-2)] border border-[var(--border)]">
               <input type="checkbox" checked={auto} onChange={e => setAuto(e.target.checked)} />
-              auto 15s
+              auto 40s
             </label>
             <button
               onClick={refetch}
@@ -211,7 +225,13 @@ export default function StrAuxPage() {
                 key={sym}
                 symbol={sym}
                 coin={co}
-                histogram={<Histogram counts={co?.hist?.counts ?? []} height={70} nuclei={(co?.fm?.nuclei ?? []).map(n => n.binIndex)} />}
+                histogram={
+                  <Histogram
+                    counts={co?.hist?.counts ?? []}
+                    height={70}
+                    nuclei={(co?.fm?.nuclei ?? []).map(n => n.binIndex)}
+                  />
+                }
               />
             );
           })}

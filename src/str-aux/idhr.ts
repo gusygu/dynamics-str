@@ -10,7 +10,7 @@ import type {
   OpeningExact,
   Nucleus,
   IdhrResult,
-} from '@/lab/str-aux/types';
+} from '@/str-aux/types';
 
 // ---------- Config & Types ----------
 
@@ -169,7 +169,7 @@ export function extractNuclei(bins: IdhrBins, k: number): Nucleus[] {
 
 // ---------- Floating Mode (metrics) ----------
 
-export function computeFloatingModeIDHR(
+export function computeFM(
   points: MarketPoint[],
   opening: OpeningExact,
   cfg: Partial<IdhrConfig> = {},

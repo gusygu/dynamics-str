@@ -1,0 +1,19 @@
+# Node / Next / pnpm
+node_modules
+.pnpm
+.next
+dist
+coverage
+pnpm-debug.log*
+*.log
+
+# Env & local only
+.env
+.env.*.local
+*.local
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json

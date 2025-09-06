@@ -1,0 +1,67 @@
+/* app/globals.css */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* cobalt-gris theme */
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
+
+table { border-collapse: separate; border-spacing: 0; }
+th, td { white-space: nowrap; }
+
+html, body {
+  height: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+}
+
+/* src/app/globals.css */
+
+* { box-sizing: border-box; }
+
+html, body, #__next { height: 100%; }
+
+body {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+table { border-collapse: separate; border-spacing: 0; }
+th, td { white-space: nowrap; }
+
+:root { --bg: #fafafa; --fg: #0a0a0a; }
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans",
+    "Apple Color Emoji", "Segoe UI Emoji";
+}
+a { color: #2563eb; text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* Lab dark theme tokens */
+.theme-lab {
+  --bg: #0b1020;
+  --panel: #0f172a;     /* slate-900-ish */
+  --panel-2: #0b1327;   /* slightly darker */
+  --border: #1f2a44;    /* slate-blue border */
+  --text: #e7ecf6;
+  --muted: #8ea1c2;
+
+  --accent-1: #9c5fff;  /* violet */
+  --accent-2: #3be381;  /* neon green */
+  --accent-3: #f472b6;  /* pink */
+}
+
+.theme-lab .font-sans {
+  font-feature-settings: "tnum" 1, "lnum" 1;
+}

@@ -13,7 +13,7 @@ const pool = new Pool({
   idleTimeoutMillis: 30_000,
 });
 
-type Key = {
+export type Key = {
   base: string;
   quote: string;
   window: '30m' | '1h' | '3h';

@@ -1,252 +1,257 @@
 // src/app/api/str-aux/bins/route.ts
 import { NextResponse } from 'next/server';
-import * as binance from '@/sources/binance';
-import { computeFM, type IdhrConfig, type MarketPoint, type Opening } from '@/str-aux/idhr';
-import type { WindowKey } from '@/str-aux/types';
+
+// ---- shared types + analytics ----------------------------------------------
+import type { WindowKey, MarketPoint, OpeningExact } from '@/str-aux/types';
+import { computeIdhrBinsN, computeFM } from '@/str-aux/idhr';
+import {
+  getOrInitSymbolSession,
+  updateSymbolSession,
+  exportStreams,
+} from '@/str-aux/session';
 import { upsertSession } from '@/lib/str-aux/sessionDb';
-import type { Snapshot } from '@/str-aux/session';
 
-// ----------------------------- helpers --------------------------------------
+// ---- live data (orderbook + klines + 24h ticker) ---------------------------
+import {
+  fetchOrderBookPoint,
+  fetchKlinesPoints,
+  fetchTicker24h,
+} from '@/sources/binance';
 
-const QUOTE = 'USDT' as const;
+// ---------------------------------------------------------------------------
+// helpers
 
-function num(x: any, fallback = 0): number {
-  const n = Number(x);
-  return Number.isFinite(n) ? n : fallback;
+type Interval = '1m' | '5m' | '15m' | '30m' | '1h';
+
+// UI uses: '30m' | '1h' | '3h'
+// Binance has no '3h' → pull 5m with plenty of bars
+function windowToInterval(w: WindowKey): { interval: Interval; klineLimit: number } {
+  switch (w) {
+    case '30m': return { interval: '1m',  klineLimit: 240 }; // ~4h of minutes
+    case '1h':  return { interval: '1m',  klineLimit: 360 }; // ~6h of minutes
+    case '3h':  return { interval: '5m',  klineLimit: 240 }; // ~20h of 5m bars
+    default:    return { interval: '1m',  klineLimit: 240 };
+  }
 }
 
-function toWindowKey(s: string | null | undefined): WindowKey {
-  if (s === '30m' || s === '1h' || s === '3h') return s;
-  return '30m';
+function parseWindow(s: string | null | undefined): WindowKey {
+  const v = (s ?? '30m').toLowerCase();
+  return (v === '30m' || v === '1h' || v === '3h') ? (v as WindowKey) : '30m';
 }
 
-function sanitizeCoinsParam(s: string | null | undefined): string[] {
-  if (!s) return ['BTC', 'ETH', 'BNB', 'SOL', 'ADA', 'XRP', 'PEPE', 'USDT'];
-  return s.split(',').map(v => v.trim().toUpperCase()).filter(Boolean);
+function toSymbol(baseOrPair: string) {
+  const u = baseOrPair.trim().toUpperCase();
+  return u.endsWith('USDT') ? u : `${u}USDT`;
 }
 
-function makeSymbol(base: string, quote = QUOTE): string {
-  return /USDT$/i.test(base) ? base.toUpperCase() : `${base.toUpperCase()}${quote}`;
+function parseCoinsParam(s: string | null | undefined): string[] {
+  const raw = (s ?? process.env.NEXT_PUBLIC_COINS ?? 'BTC ETH BNB SOL ADA XRP')
+    .toUpperCase()
+    .split(/[,\s]+/)
+    .map(v => v.trim())
+    .filter(Boolean);
+  return raw.map(toSymbol);
 }
 
-function lastPriceFromTicker(t: any): number {
-  return num(t?.lastPrice ?? t?.price ?? t?.close ?? t?.c ?? t?.last, 0);
-}
-function pctFromTicker24h(t: any): number {
-  // fraction: +1.23% => 0.0123
-  const raw = t?.priceChangePercent ?? t?.P ?? t?.pct24h ?? 0;
-  return num(raw, 0) / 100;
-}
-function priceChangeFromTicker(t: any): number {
-  return num(t?.priceChange ?? t?.p ?? 0, 0);
+function parseBinsParam(s: string | null | undefined, dflt = 128) {
+  const n = Number(s ?? dflt);
+  return Number.isFinite(n) && n > 0 ? Math.min(2048, Math.max(8, Math.floor(n))) : dflt;
 }
 
-async function fetchTicker24hSafe(
-  binanceMod: any,
-  symOrBase: string,
-  quote: 'USDT' = QUOTE
-) {
-  const symbol = makeSymbol(symOrBase, quote);
-  const m: any = binanceMod;
-  const fn =
-    m.fetchTicker24h ??
-    m.fetch24hTicker ??
-    m.ticker24h ??
-    m.fetch24hTickers; // last-resort (some repos had plural)
-  if (!fn) throw new Error('binance.fetchTicker24h not available');
-  const raw = await fn(symbol);
+function ensureOpening(points: MarketPoint[], fallbackPrice: number, tsNow: number): OpeningExact {
+  const p0 = Number(points[0]?.price ?? fallbackPrice ?? 0);
   return {
-    symbol,
-    price: lastPriceFromTicker(raw),
-    pct24h: pctFromTicker24h(raw), // fraction
-    priceChange: priceChangeFromTicker(raw),
-    raw,
+    benchmark: p0 > 0 ? p0 : 0,
+    pct24h: 0,
+    id_pct: 0,
+    ts: Number(points[0]?.ts ?? tsNow),
+    layoutHash: 'str-aux:idhr-128',
   };
 }
 
-async function fetchKlinesSafe(
-  binanceMod: any,
-  symOrBase: string,
-  window: WindowKey,
-  limit: number,
-  quote: 'USDT' = QUOTE
-): Promise<MarketPoint[]> {
-  const symbol = makeSymbol(symOrBase, quote);
-  const interval = window; // our WindowKey matches Binance intervals
-  const m: any = binanceMod;
-  const fn = m.fetchKlines ?? m.fetchKLines ?? m.klines ?? m.fetchCandles;
-  if (!fn) throw new Error('binance.fetchKlines not available');
-  const arr: any[] = await fn(symbol, interval, limit);
-  // [openTime, open, high, low, close, volume, closeTime, ...]
-  return arr.map(k => ({
-    ts: num(k?.[6] ?? k?.closeTime ?? k?.[0] ?? Date.now()),
-    price: num(k?.[4] ?? k?.close ?? k?.price ?? k?.[1]),
-    volume: num(k?.[5] ?? k?.volume ?? 0),
-  }));
-}
+// Prefer a live orderbook mid snapshot; fall back to recent klines
+async function loadPoints(symbol: string, windowKey: WindowKey, binsN: number): Promise<MarketPoint[]> {
+  const { interval, klineLimit } = windowToInterval(windowKey);
 
-function priceHistogram(points: MarketPoint[], bins: number) {
-  if (!points.length) return { counts: Array(bins).fill(0), min: 0, max: 0 };
-  const min = points.reduce((a, p) => Math.min(a, p.price), points[0].price);
-  const max = points.reduce((a, p) => Math.max(a, p.price), points[0].price);
-  const width = max > min ? (max - min) / bins : 1;
-  const counts = Array(bins).fill(0);
-  for (const p of points) {
-    let idx = Math.floor((p.price - min) / width);
-    if (idx < 0) idx = 0;
-    if (idx >= bins) idx = bins - 1;
-    counts[idx] += 1;
-  }
-  return { counts, min, max };
-}
-
-async function persistSessionSafely(
-  base: string,
-  quote: string,
-  windowKey: WindowKey,
-  appSessionId: string,
-  ss: any,
-  openingStamp: boolean,
-  shiftStamp: boolean,
-  gfmDelta?: number
-) {
+  // Try a very-fresh orderbook mid
+  let pts: MarketPoint[] = [];
   try {
-    const key = { base, quote, window: windowKey, appSessionId };
-    await upsertSession(key as any, ss as any, openingStamp, shiftStamp, gfmDelta);
-  } catch (err) {
-    console.error('sessionDb upsert failed:', err);
+    const p = await fetchOrderBookPoint(symbol, 100);
+    if (Number.isFinite(p.price) && p.price > 0) pts.push(p);
+  } catch { /* ignore */ }
+
+  // Fill with historical klines for density
+  try {
+    const klPts = await fetchKlinesPoints(symbol, interval, Math.max(klineLimit, binsN * 2));
+    if (Array.isArray(klPts) && klPts.length) {
+      pts = [...klPts, ...pts];
+    }
+  } catch { /* ignore */ }
+
+  // Dedup by ts, sorted asc
+  const seen = new Set<number>();
+  const uniq: MarketPoint[] = [];
+  for (const p of pts.sort((a, b) => a.ts - b.ts)) {
+    if (!seen.has(p.ts)) {
+      seen.add(p.ts);
+      uniq.push(p);
+    }
   }
+  return uniq;
 }
 
-// -------------------------------- GET ---------------------------------------
+// ---------------------------------------------------------------------------
+// GET
 
 export async function GET(req: Request) {
   try {
     const url = new URL(req.url);
-    const coinsParam = sanitizeCoinsParam(url.searchParams.get('coins'));
-    const windowKey = toWindowKey(url.searchParams.get('window'));
-    const binsParam = num(url.searchParams.get('bins'), 128);
-    const appSessionId = (url.searchParams.get('sessionId') ?? 'ui').toString();
-
-    const bases = coinsParam
-      .map(s => s.replace(/USDT$/i, ''))
-      .filter(b => b && b !== 'USDT'); // never query USDTUSDT
-
-    const results: Record<string, any> = {};
+    const coins = parseCoinsParam(url.searchParams.get('coins'));
+    const windowKey = parseWindow(url.searchParams.get('window'));
+    const binsN = parseBinsParam(url.searchParams.get('bins'), 128);
+    const appSessionId = (url.searchParams.get('sessionId') ?? 'ui').slice(0, 64);
     const now = Date.now();
 
-    for (const base of bases) {
+    if (!coins.length) {
+      return NextResponse.json({ ok: true, symbols: [], out: {}, window: windowKey, ts: now });
+    }
+
+    const out: Record<string, any> = {};
+
+    for (const symbol of coins) {
+      const base = symbol.replace(/USDT$/i, '');
       try {
-        const [ticker, points] = await Promise.all([
-          fetchTicker24hSafe(binance, base, QUOTE),
-          fetchKlinesSafe(binance, base, windowKey, binsParam, QUOTE),
-        ]);
+        // (1) snapshot: last price + 24h for labels / quick UI
+        const t24 = await fetchTicker24h(symbol); // -> { price, pct24h }
+        const lastPriceFromTicker = Number(t24?.price ?? NaN);
+        const pct24h = Number(t24?.pct24h ?? 0);
 
-        const price = ticker.price;
-        const pct24h = ticker.pct24h; // fraction
-        const symbol = makeSymbol(base, QUOTE);
+        // (2) points: orderbook mid (fresh) + klines (dense)
+        const points = await loadPoints(symbol, windowKey, binsN);
 
-        const { counts, min, max } = priceHistogram(
-          points,
-          Math.max(32, Math.min(binsParam, 256))
-        );
+        if (!points.length || !Number.isFinite(points[points.length - 1]?.price)) {
+          out[symbol] = { ok: false, error: 'no market data', n: 0, bins: binsN };
+          continue;
+        }
 
-        const opening: Opening = {
-          benchmark: 0,
-          pct24h,
-          pct_drv: 0,
-          ts: now,
-          layoutHash: `${symbol}:${windowKey}`,
-        };
+        const lastPoint = points[points.length - 1];
+        const lastPrice = Number.isFinite(lastPoint.price) ? lastPoint.price : lastPriceFromTicker;
 
-        // IDHR / FM with the constants we standardized on:
-        const cfg: Partial<IdhrConfig> = { K: 32 };
-        const fmRaw = computeFM(points, opening, cfg);
+        // (3) opening + session
+        const opening = ensureOpening(points, lastPriceFromTicker, now);
+        if (!(opening.benchmark > 0)) {
+          out[symbol] = { ok: false, error: 'opening≤0', n: points.length, bins: binsN };
+          continue;
+        }
 
-        // Normalize to the schema the UI reads today:
-        const fm = {
-          gfm: fmRaw.gfm,
-          sigma: (fmRaw as any).sigmaGlobal ?? 0,
-          zAbs: (fmRaw as any).zMeanAbs ?? 0,
-          vInner: fmRaw.vInner,
-          vOuter: fmRaw.vOuter,
-          inertia: fmRaw.inertia,
-          disruption: fmRaw.disruption,
-          nuclei: (fmRaw as any).nuclei ?? [],
-        };
+        // Session orchestration (GFMr/GFMc, swaps, K-cycle shifts, min/max, streams)
+        const ss = getOrInitSymbolSession(appSessionId, symbol, opening.benchmark, now);
 
-        // minimal session (enough for persistence & future streaming)
-        const snap: Snapshot = {
-          price,
-          benchPct: pct24h,
-          pctDrv: Math.abs(pct24h),
-          pct24h,
-          ts: now,
-        } as any;
+        // (4) IDHR + FM
+        const idhr = computeIdhrBinsN(points, opening, {}, binsN);
+        const fm = computeFM(points, opening, { totalBins: binsN });
 
-        const ss: any = {
-          openingTs: points[0]?.ts ?? now,
-          openingPrice: points[0]?.price ?? price,
-          priceMin: min,
-          priceMax: max,
-          benchPctMin: pct24h,
-          benchPctMax: pct24h,
-          swaps: 0,
-          shifts: 0,
-          etaPct: 0.0005,
-          epsShiftPct: 0.002,
-          K: 32,
-          greatestBenchAbs: Math.abs(pct24h),
-          greatestDrvAbs: Math.abs(pct24h),
-          greatestPct24hAbs: Math.abs(pct24h),
-          lastPrice: price,
-          uiEpoch: 0,
-          aboveCount: 0,
-          belowCount: 0,
-          gfmRefPrice: undefined,
-          gfmAnchorPrice: price,
-          lastBenchSign: Math.sign(pct24h) || 0,
-          snapPrev: snap,
-          snapCur: snap,
-          gfmDeltaAbsPct: Math.abs(pct24h),
-        };
+        // Convert FM.gfm (log return) to price-space (GFMc)
+        const gfmReturns = Number(fm?.gfm ?? 0);            // log(px/p0)
+        const gfmCalcPrice = opening.benchmark * Math.exp(gfmReturns);
 
-        // Best-effort persistence; non-fatal on failure.
-        await persistSessionSafely(
-          base,
-          QUOTE,
-          windowKey,
-          appSessionId,
-          ss,
-          false,
-          false,
-          ss.gfmDeltaAbsPct
-        );
+        // (5) update session with current snapshot
+        const upd = updateSymbolSession(ss, lastPrice, lastPoint.ts ?? now, gfmCalcPrice, pct24h);
+        const streams = exportStreams(ss);
 
-        results[symbol] = {
+        // (6) persist (best-effort). openingStamp only at cold-start-ish state.
+        const looksLikeFreshOpen =
+          ss.priceMin === ss.openingPrice &&
+          ss.priceMax === ss.openingPrice &&
+          ss.shifts === 0 &&
+          ss.swaps === 0;
+
+        try {
+          await upsertSession(
+            { base, quote: 'USDT', window: windowKey, appSessionId },
+            ss,
+            /* openingStamp */ looksLikeFreshOpen,
+            /* shiftStamp   */ !!upd?.isShift,
+            /* gfmDelta     */ upd?.gfmDeltaAbsPct ?? 0
+          );
+        } catch { /* ignore in dev */ }
+
+        // (7) UI shape (keeps the existing contract, adds cards.*)
+        out[symbol] = {
           ok: true,
-          base,
-          quote: QUOTE,
-          symbol,
-          price,
-          pct24h,
+          n: points.length,
+          bins: binsN,
           window: windowKey,
-          bins: binsParam,
-          fm,
-          hist: { counts, max: Math.max(...counts), bins: counts.length },
-          streams: [], // can be wired to exportStreams(ss) later
-          ts: now,
+
+          // --- cards for UI tiles ------------------------------------------------
+          cards: {
+            opening: {
+              benchmark: ss.openingPrice,       // opening card: big number
+              pct24h: ss.snapPrev?.pct24h ?? pct24h, // small caption (at open)
+            },
+            live: {
+              benchmark: ss.snapCur?.price ?? lastPrice,   // live-market benchmark
+              pct24h: ss.snapCur?.pct24h ?? pct24h,        // from ticker
+              pct_drv: ss.snapCur?.pctDrv ?? 0,            // from session dynamics
+            },
+          },
+
+          // --- FM / GFM block ----------------------------------------------------
+          fm: {
+            gfm_ref_price: ss.gfmRefPrice ?? undefined,      // GFMr anchor
+            gfm_calc_price: ss.gfmCalcPrice ?? gfmCalcPrice, // GFMc (live)
+            sigma: fm?.sigmaGlobal ?? idhr?.sigmaGlobal ?? 0,
+            zAbs: fm?.zMeanAbs ?? 0,
+            vInner: fm?.vInner ?? 0,
+            vOuter: fm?.vOuter ?? 0,
+            inertia: fm?.inertia ?? 0,
+            disruption: fm?.disruption ?? 0,
+            nuclei: (fm?.nuclei ?? []).map((n: any, i: number) => ({
+              binIndex: Number(n?.key?.idhr ?? i),          // stable highlight in histogram
+            })),
+          },
+
+          // Δ vs GFMr (abs %), for the badge
+          gfmDelta: {
+            absPct: upd?.gfmDeltaAbsPct ?? 0,
+            anchorPrice: ss.gfmRefPrice ?? null,
+            price: lastPrice,
+          },
+
+          // sessions + shifts
+          swaps: ss.swaps,
+          shifts: {
+            nShifts: ss.shifts,
+            timelapseSec: Math.floor((now - ss.openingTs) / 1000),
+            latestTs: lastPoint.ts ?? now,
+          },
+          shift_stamp: !!upd?.isShift,
+
+          // session min/max + extrema (session-bounded)
+          sessionStats: {
+            priceMin: ss.priceMin,
+            priceMax: ss.priceMax,
+            benchPctMin: ss.benchPctMin,
+            benchPctMax: ss.benchPctMax,
+          },
+
+          streams,
+          hist: { counts: idhr?.counts ?? [] },
+
+          meta: { uiEpoch: upd?.uiEpoch ?? ss.uiEpoch },
+          lastUpdateTs: lastPoint.ts ?? now,
         };
-      } catch (coinErr) {
-        const symbol = makeSymbol(base, QUOTE);
-        console.error('coin failed', base, coinErr);
-        results[symbol] = { ok: false, error: String(coinErr) };
+      } catch (err: any) {
+        console.error(`coin failed ${base}`, err?.message ?? err);
+        out[symbol] = { ok: false, error: String(err?.message ?? err) };
       }
     }
 
-    return NextResponse.json({ ok: true, coins: results, window: windowKey, ts: now });
-  } catch (err) {
+    // UI contract: { symbols, out, window, ts }
+    const symbols = Object.keys(out);
+    return NextResponse.json({ ok: true, symbols, out, window: windowKey, ts: now });
+  } catch (err: any) {
     console.error('bins route failed', err);
-    return NextResponse.json({ ok: false, error: String(err) }, { status: 500 });
+    return NextResponse.json({ ok: false, error: String(err?.message ?? err) }, { status: 500 });
   }
 }

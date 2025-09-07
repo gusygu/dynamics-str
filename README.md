@@ -1,474 +1,234 @@
-Dynamics — Matrices (CryptoPi)
 
-A minimal, fast, direct-only market matrices dashboard.
+# CryptoPi — STR‑Aux (Strategy Aux)
 
-5 matrices over an 
-𝑁
-×
-𝑁
-N×N coin set:
+Live **orderbook → klines → IDHR/FM → session (GFMr/GFMc) → UI** pipeline for fast, shift‑aware market diagnostics.
 
-benchmark — last price (A/B), inverse-filled
+> This repo is a focused shard of **CryptoPi**. It runs a minimal yet robust server+UI that:
+> - Pulls **Binance** public data (orderbook mid + backfilled klines)
+> - Computes **IDHR** histogram + **Floating Mode** metrics (GFM, σ, |z|, nuclei, …)
+> - Maintains a **session row** per symbol (GFMr anchor, shifts, swaps, min/max, stamps)
+> - Serves a compact **UI** (cards + histogram + stream table) with **epoch‑gated** updates
 
-delta — absolute 24h change, antisymmetric fill
 
-pct24h — 24h change %, shown as percent
+---
 
-id_pct — instantaneous % from previous benchmark
+## Features
 
-pct_drv — first difference of id_pct; highlights sign flips (−→+ blue / +→− orange)
+- **Direct Binance sourcing** (no API key):  
+  - `/api/v3/ticker/24hr` for 24h stats (price, %)
+  - `/api/v3/depth` (top of book) → **mid** for current price
+  - `/api/v3/klines` for historical backfill (intervals: `30m`, `1h`, `3h`)
 
-40s non-overlapping poller → writes snapshots into Postgres
+- **IDHR + FM** (state‑of‑the‑art deterministic histogram):  
+  - Exact-bins build (e.g., 128), robust stats, nuclei extraction  
+  - `GFMc` (calc) + `GFMr` (anchored reference), σ, |z|, inertia, disruption
 
-Polished UI (Tailwind + Inter + JetBrains Mono), 2 matrices per row, rounded “pill” cells with heatmap
+- **Session engine** (per `(base,quote,window,appSessionId)`):  
+  - **Opening** stamp, **Shift** stamp (K‑cycle confirmation)  
+  - Persistent **MIN/MAX** (price & %), **greatest magnitudes**, **snapPrev/snapCur**  
+  - **Epoch gate**: UI adopts only when the session commits a new epoch
 
-Strict direct-only sourcing from Binance /api/v3/ticker/24hr — no USDT bridging
+- **UI** (Next.js + Tailwind):  
+  - Cards: **GFM**, σ, |z|, **Opening**, **Live market** (benchmark, pct24h, pct_drv)  
+  - Histogram with **nuclei** markers; stream table (prev/cur/greatest)  
+  - Poll button + **auto 40s** toggle; window selector (30m / 1h / 3h)
 
-Flags: yellow ≈ 0, purple = frozen (no change vs previous cycle), pct_drv blue/orange ring = id_pct sign flip
+---
 
-Quickstart
+## Quickstart
+
+### Requirements
+- Node 20+ (or 22+), pnpm 9+
+- Postgres 14+ (16+ recommended)
+
+### 1) Install
+```bash
 pnpm i
+```
 
-# 1) Configure DB and coins
-copy .env.example .env
-# edit .env -> DATABASE_URL, COINS (comma-separated tickers)
+### 2) Configure environment
+Create `.env` in the project root:
+```ini
+# database
+DATABASE_URL=postgres://postgres:postgres@localhost:5432/cryptopi
 
-# 2) Create tables
-pnpm run ddl
+# Binance public REST base (optional override)
+BINANCE_BASE=https://api.binance.com
 
-# 3) Start the poller (writes every ~40s)
-pnpm run poller
+# Session shift confirmation cycles (server)
+SHIFT_K=32       # default; can be lowered for testing (e.g., 3)
 
-# 4) Run the web app
+# Client-side hint (optional debug knob)
+NEXT_PUBLIC_SHIFT_K=32
+```
+> No API keys are required for the used Binance endpoints.
+
+### 3) Create DB schema
+```bash
+# Linux/macOS
+psql "$DATABASE_URL" -f src/db/ddl-str.sql
+
+# Windows (PowerShell)
+# $env:DATABASE_URL="postgres://..."
+psql $env:DATABASE_URL -f src/db/ddl-str.sql
+```
+
+### 4) Run the app
+```bash
 pnpm dev
-# http://localhost:3000
-
-
-You can also embed the poller inside the app: set EMBED_POLLER=true in .env and open /api/status once to start it.
-
-.env
-DATABASE_URL=postgres://postgres:postgres@localhost:5432/dynamics
-COINS=BTC,ETH,BNB,SOL,ADA,XRP,DOGE,USDT
-
-# poll cadence
-POLL_INTERVAL_MS=40000
-EMBED_POLLER=false
-
-# sources
-BINANCE_BASE_URL=https://api.binance.com
-
-# id_pct sign-flip tolerance (optional)
-SIGN_EPS_ABS=1e-9
-SIGN_EPS_REL=1e-3
-
-
-Keep your real .env out of git. See .env.example.
-
-Scripts
-# Apply / re-apply schema
-pnpm run ddl
-
-# Start the 40s writer loop (standalone)
-pnpm run poller
-
-# Inspect DB structure
-pnpm run db:inspect
-pnpm run db:inspect dyn_matrix_values
-
-# Peek latest values for a pair (defaults BTC ETH)
-pnpm run peek BTC ETH
-
-# (optional) one-shot write from the app
-curl -X POST http://localhost:3000/api/pipeline/run-once
-
-API
-
-GET /api/status
-Health + latest timestamps + row counts per matrix.
-
-GET /api/matrices/latest
-Latest snapshot payload (coins, matrices, flags, ts).
-
-GET /api/matrices/server
-Same as above; separated for internal/automation use.
-
-POST /api/pipeline/run-once
-Force a single snapshot write immediately.
-
-GET /api/coverage
-Boolean matrix indicating which direct A/B symbols exist on Binance for your COINS.
-
-Note: The /api/export route is currently disabled. We’ll re-enable CSV/JSON snapshot export in a follow-up.
-
-Data model
-
-Table: dyn_matrix_values
-
-column	type	notes
-ts_ms	BIGINT (ms)	snapshot timestamp
-matrix_type	TEXT	one of: benchmark, delta, pct24h, id_pct, pct_drv
-base	TEXT	coin A
-quote	TEXT	coin B
-value	DOUBLE PRECISION	cell value
-meta	JSONB	metadata (mode, coins, etc.)
-
-PK (ts_ms, matrix_type, base, quote)
-
-Index (matrix_type, base, quote, ts_ms DESC)
-
-Rows per snapshot: up to 
-𝑁
-×
-(
-𝑁
-−
-1
-)
-N×(N−1).
-With direct-only sourcing, missing markets remain NULL (rendered as dashes).
-
-Math (what each matrix means)
-
-Let 
-𝑃
-𝐴
-/
-𝐵
-P
-A/B
-	​
-
- be last traded price for symbol A B on Binance.
-
-benchmark
-
-Direct rows: 
-𝑃
-𝐴
-/
-𝐵
-P
-A/B
-	​
-
- from ticker
-
-Fill inverse: 
-𝑃
-𝐵
-/
-𝐴
-=
-1
-/
-𝑃
-𝐴
-/
-𝐵
-P
-B/A
-	​
-
-=1/P
-A/B
-	​
-
-
-Diagonal: null
-
-delta (absolute 24h change)
-
-Direct rows: priceChange
-
-Antisymmetric fill: 
-Δ
-𝐵
-/
-𝐴
-=
-−
-Δ
-𝐴
-/
-𝐵
-Δ
-B/A
-	​
-
-=−Δ
-A/B
-	​
-
-
-No further normalization
-
-pct24h
-
-Direct rows: priceChangePercent / 100 (stored as decimal)
-
-Antisymmetric fill: 
-𝑝
-𝐵
-/
-𝐴
-=
-−
-𝑝
-𝐴
-/
-𝐵
-p
-B/A
-	​
-
-=−p
-A/B
-	​
-
-
-Rendered as % (e.g., 1.23%)
-
-id_pct
-
-id_pct
-𝑡
-(
-𝐴
-/
-𝐵
-)
-=
-𝑃
-𝑡
-(
-𝐴
-/
-𝐵
-)
-−
-𝑃
-𝑡
-−
-1
-(
-𝐴
-/
-𝐵
-)
-𝑃
-𝑡
-−
-1
-(
-𝐴
-/
-𝐵
-)
-id_pct
-t
-	​
-
-(A/B)=
-P
-t−1
-	​
-
-(A/B)
-P
-t
-	​
-
-(A/B)−P
-t−1
-	​
-
-(A/B)
-	​
-
-
-computed after benchmark inverse fill.
-Rendered as raw 7 decimals.
-
-pct_drv
-
-pct_drv
-𝑡
-(
-𝐴
-/
-𝐵
-)
-=
-id_pct
-𝑡
-(
-𝐴
-/
-𝐵
-)
-−
-id_pct
-𝑡
-−
-1
-(
-𝐴
-/
-𝐵
-)
-pct_drv
-t
-	​
-
-(A/B)=id_pct
-t
-	​
-
-(A/B)−id_pct
-t−1
-	​
-
-(A/B)
-
-Rendered as raw 7 decimals.
-Sign-flip overlay (pct_drv only): compare signs of 
-id_pct
-𝑡
-id_pct
-t
-	​
-
- and 
-id_pct
-𝑡
-−
-1
-id_pct
-t−1
-	​
-
- with tolerance:
-
-blue ring: 
-−
-→
-+
-−→+
-
-orange ring: 
-+
-→
-−
-+→−
-Tolerances: SIGN_EPS_ABS, SIGN_EPS_REL.
-
-Flags
-
-frozen (purple): value unchanged vs previous snapshot
-
-near zero (yellow): small magnitude band
-
-Architecture
+# open http://localhost:3000/str-aux
+```
+- Use the **Fetch** button or enable **auto 40s**.
+- Adjust the **coin list** (space/comma separated tickers; `USDT` quote is implicit).
+
+---
+
+## API
+
+### `GET /api/str-aux/bins`
+Query params:
+- `coins`: e.g. `BTC,ETH,BNB,SOL` or `"BTC ETH BNB SOL"` (USDT is implied)
+- `window`: `30m` | `1h` | `3h`  (maps to Binance intervals)
+- `bins`: histogram bins (e.g., 128)
+- `sessionId`: application session key (UI uses `ui`)
+
+Response shape (per symbol; additive across versions):
+```ts
+{
+  ok: true,
+  base: "BTC",
+  quote: "USDT",
+  symbol: "BTCUSDT",
+  price: 60321.5,
+  pct24h: -0.0134,             // fraction (−1.34%)
+  window: "30m",
+  bins: 128,
+  fm: {
+    gfm_price?: number,        // current GFMc (price space)
+    gfm_ref_price?: number,    // GFMr (anchor)
+    sigma: number,
+    zAbs: number,
+    vInner: number,
+    vOuter: number,
+    inertia: number,
+    disruption: number,
+    nuclei: Array<{ binIndex: number; density: number; firstDegree: number; secondDegree: number; }>
+  },
+  hist: {
+    counts: number[],          // 0..bins-1
+    max: number,
+    bins: number
+  },
+  // meta: { uiEpoch, opening, shift_stamp, ... }  // may be present if persistence is enabled
+  ts: 1757246692909
+}
+```
+> The **UI adopts** snapshot data only when `uiEpoch` increments (epoch gate). Live tiles (e.g., delta vs anchor) are allowed to tick using current price without unfreezing the whole panel.
+
+---
+
+## Architecture
+
+```
 src/
-  app/                      # Next.js app router (pages & API routes)
-    api/
-      status/
-      matrices/
-        latest/
-        server/
-      pipeline/
-        run-once/
-      coverage/
-    (UI pages)
-  components/               # Matrix, Legend, StatusCard, TimerBar
-  core/
-    pipeline.ts             # 40s loop; build → persist
-    db.ts                   # PG pool + queries
-    matricesLatest.ts       # server builder for latest payload
-  math/
-    utils.ts                # invertGrid, antisymmetrize, newGrid
-    matrices.ts             # buildPrimaryDirect + buildDerived
-  sources/
-    binance.ts              # fetch 24h ticker and map
-  scripts/
-    ddl.ts                  # apply DDL
-    poller.ts               # start loop (standalone)
-    db-inspect.ts           # print columns/indexes
-    peek-latest.ts          # CLI peek for a pair
-db/
-  ddl.sql                   # schema for dyn_matrix_values
+  app/
+    str-aux/
+      page.tsx            # controls polling; renders grid of CoinPanel
+      CoinPanel.tsx       # cards + histogram + stream table
+      Histogram.tsx       # simple bar visual with nuclei
+    api/str-aux/bins/route.ts
+                          # pipeline: orderbook mid + klines → IDHR/FM
+                          # → session stamps (opening/shift/min/max) → JSON
+  lib/str-aux/sessionDb.ts# Postgres upsert for str_aux_session + event log
+  str-aux/
+    idhr.ts               # deterministic histogram + FM metrics
+    session.ts            # in-memory session evolution + stream exports
+    types.ts              # common types for server/UI
+  sources/binance.ts      # lightweight REST adapter (ticker, klines, orderbook)
+  db/ddl-str.sql          # schema (strategy_aux.str_aux_session/event)
+```
 
-UI
+**Data flow**
+1. **Binance**: snapshot top-of-book (mid) + backfill `klines` (dedup, sort)
+2. **IDHR/FM**: build exact‑bin histogram over log returns vs opening; extract nuclei; compute σ, |z|, inertia, disruption; compute **GFMc**
+3. **Session**: if first GFMc → set **GFMr**; track **MIN/MAX**, greatest magnitudes; count out‑of‑band cycles until **Shift**; on shift, re‑anchor GFMr and increment **uiEpoch**
+4. **UI**: snapshot is adopted when epoch increases; “Live market” card still ticks with current price every fetch
 
-Two matrices per row, responsive
+---
 
-Rounded pill cells, subtle inner border, smooth transitions
+## UI Cards
 
-Inter for text; JetBrains Mono for numbers/timers
+- **GFM** — headline shows **GFMr** (anchor); subtext shows **Δ vs GFMr** using current price.  
+  *(You can switch headline to GFMc if preferred.)*
+- **σ**, **|z|** — robust stats from IDHR.
+- **Opening** — `benchmark` and `pct24h` at opening snapshot.
+- **Live market** — `benchmark`, `pct24h`, and **pct_drv** (from dynamics‑matrices), refreshed every 40s.
+- **Histogram** — 128‑bin IDHR with **nuclei markers** (centered correctly after fix).
 
-Colors: green/red heat, yellow ≈0, purple frozen, pct_drv blue/orange sign flip
+---
 
-pct24h prints as %; others print 7 decimals
+## Configuration & Tuning
 
-Development
+- **SHIFT_K** / **NEXT_PUBLIC_SHIFT_K**: number of consecutive cycles outside the GFMr band required to confirm a shift (default 32). For quick validation you can lower to `3`.
+- **Bands & thresholds**: the session engine defines a band around GFMr; adjustment knobs (epsilons, etc.) live in `session.ts` and/or `idhr.ts`.
+- **Intervals**: `30m`, `1h`, `3h` are supported end‑to‑end (and match Binance).
 
-Requirements
+---
 
-Node 22+
+## Troubleshooting
 
-pnpm 9+
+- **“binance.fetchKlines not available”** — ensure `src/sources/binance.ts` is the new adapter (exports `fetchTicker24h`, `fetchKlines`). Restart dev server after changes.
+- **Empty `coins[...]`** — check network (Binance reachable), query params, and that `USDTUSDT` isn’t being requested.
+- **DB write errors** — verify `DATABASE_URL` and run `src/db/ddl-str.sql`.
+- **Green bars clumped left in histogram** — you’re likely plotting linear price into bins computed in **log‑return space**. Always build IDHR on `log(px/p0)` with `p0 = opening.benchmark`. (This repo does.)
 
-Postgres 16+ running locally
+---
 
-Run
+## Scripts (suggested)
 
-pnpm i
-pnpm run ddl
-pnpm run poller     # or EMBED_POLLER=true + open /api/status
-pnpm dev
+Add to `package.json` if you want shortcuts:
+```jsonc
+{
+  "scripts": {
+    "ddl": "psql \\\"$DATABASE_URL\\\" -f src/db/ddl-str.sql",
+    "dev": "next dev -p 3000",
+    "build": "next build",
+    "start": "next start -p 3000"
+  }
+}
+```
 
+---
 
-Troubleshooting
+## Roadmap
 
-SCRAM ... client password must be a string → DATABASE_URL missing/invalid; ensure .env is loaded (scripts use dotenv/config).
+- Stream table unfreeze + metrics refresh every epoch
+- More resilient nuclei detection; optional KDE mode
+- Historical view by `ts` (time travel) and CSV export
+- Coin selector component; per‑coin settings (K, epsilons)
+- Docker compose (db + app) for one‑shot boot
 
-column "ts_ms" does not exist → you likely have a legacy table. This app uses dyn_matrix_values; re-run pnpm run ddl.
+---
 
-Empty cells/dashes → no direct market on Binance for that pair (by design). Check /api/coverage.
+## License
 
-Roadmap
+TBD (project‑internal).
 
-Re-enable /api/export (CSV/JSON, tidy vs matrix)
+---
 
-Date picker to view historical /api/matrices/at?ts=...
+## Credits
 
-Tiny rate-limit for public routes
+Built fast with ❤️ under the **CryptoPi** umbrella.  
+This repo is a concentrated, production‑lean step on the path to the full dashboard.
 
-Unit tests for invertGrid/antisymmetrize/derived math
+*by gus & g* 
 
-Optional Docker (db + app) for parity
+(Readme sketched by g (from chatGPT))
 
-Snapshot toolbar (download CSV, copy timestamp)
+---
 
-Theme switch (dark cobalt ↔ slate)
+### gus notes
 
-License
-
-TBD (project-internal).
-Add a license when you’re ready.
-
-Credits
-
-Built fast with ❤️ under the CryptoPi umbrella. Direct-only by default for clean semantics
-
-/// README.md written by g, from chatGPT;
-
-I've done this project with help and guidance of chatGPT genAI, it took me some months for pre-training and for scratching basic logic of TS and Python (not used here). This last version has been made in a couple of hours. Which has been a huge progress for me and the genAI.
-This present repo is mostly a shard of a bigger project (CryptoPi (please don't ruin the name)) (as signalized above ^^^^, by g) and is a stepping stone for a complete dashboard, before moving to the actual app.
-It aims providing orientation for those who search trading techniques in cryptoasset market. For now t dispose only of the combination of BTC, ETH, BNB, SOL, ADA, XRP, PEPE, USDT; but it'll soon be updated to have a coin selector for free pairing.
-It'll soon be updated.
-I don't know exactly what anyone would think of the project, or if it has any value at all. 
-But if you took interest enough to read this .md, it means something. And that makes me happy.
-Ty you guys that also found it cool. ^~^
-
-by gus
+I'm happy with the work as it turned out to be at this point; the new feature provides a basic structure for further statistical analysis integration and a comprehensible panel that returns intuitive measures for trading orientation. I intend to launch soon the final version with the integrated dashboard of the 'dynamics' (only dynamics, no feature extension naming), that is to become the beta intended for use in CryptoPi initial build. The work is turning out to be faster than I think and despite of this persistent unease of diminished participation in coding, the project is actually getting to be built, which is already something.
+Hope this new feature and the upcoming updates get to be somehow valuable to anyone in interest.
+Salut!

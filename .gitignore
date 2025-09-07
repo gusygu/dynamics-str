@@ -1,19 +1,43 @@
-# Node / Next / pnpm
-node_modules
-.pnpm
-.next
-dist
-coverage
+# Node / PNPM
+node_modules/
+pnpm-lock.yaml
+.pnpm-store/
+
+# Next.js
+.next/
+out/
+.next-cache/
+.next-static/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 pnpm-debug.log*
 *.log
 
-# Env & local only
+# Env / Secrets
 .env
+.env.local
 .env.*.local
-*.local
 
-# OS/editor
+# OS / Editor
 .DS_Store
 Thumbs.db
+.idea/
 .vscode/*
 !.vscode/extensions.json
+!.vscode/settings.json
+
+# Tests / Coverage
+coverage/
+*.lcov
+
+# Misc
+*.swp
+*.swo
+EOF
+
+#legacy
+
+lab/

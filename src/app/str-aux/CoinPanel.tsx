@@ -36,6 +36,12 @@ type Shifts =
   | number
   | undefined;
 
+// NEW: cards contract from the API
+type Cards = {
+  opening?: { benchmark?: number; pct24h?: number };
+  live?: { benchmark?: number; pct24h?: number; pct_drv?: number };
+};
+
 type CoinOut = {
   ok?: boolean;
   meta?: { uiEpoch?: number; [k: string]: any };
@@ -45,6 +51,7 @@ type CoinOut = {
   sessionStats?: { priceMin: number; priceMax: number; benchPctMin: number; benchPctMax: number };
   stats?: { minPrice: number; maxPrice: number };
   fm?: FM;
+  cards?: Cards;          // <-- NEW
   swaps?: number;
   shifts?: Shifts;
   shiftsBlock?: Shifts;
@@ -79,11 +86,17 @@ export default function CoinPanel({
     }
   }, [coin, epoch]);
 
-  // Render snapshot for shift-sensitive tiles; keep delta live from latest 'coin'
+  // Render snapshot for shift-sensitive tiles; keep delta/live from latest 'coin'
   const render = frozen ?? coin ?? undefined;
 
   const ok = !!render?.ok;
-  const openingVal = render?.opening ?? render?.openingSet?.benchmark;
+
+  // Opening benchmark (snapshot) + caption with opening pct24h
+  const openingFallback = render?.opening ?? render?.openingSet?.benchmark;
+  const openingBench = render?.cards?.opening?.benchmark ?? openingFallback;
+  const openingPct = render?.cards?.opening?.pct24h;
+
+  // MIN/MAX (session)
   const minPrice = render?.sessionStats?.priceMin ?? render?.stats?.minPrice;
   const maxPrice = render?.sessionStats?.priceMax ?? render?.stats?.maxPrice;
 
@@ -112,6 +125,22 @@ export default function CoinPanel({
         GFMΔ = {pretty(deltaAbsPrice, 6)} ({prettyPct(deltaAbsPct, 2)}%)
       </div>
     ) : null;
+
+  // ------------------------------ Live market card ------------------------------
+  // This one should tick each refresh → read from *coin* (latest), fallback to snapshot
+  const liveBench =
+    coin?.cards?.live?.benchmark ??
+    render?.cards?.live?.benchmark ??
+    livePrice ??
+    null;
+  const livePct24h =
+    coin?.cards?.live?.pct24h ??
+    render?.cards?.live?.pct24h ??
+    null;
+  const livePctDrv =
+    coin?.cards?.live?.pct_drv ??
+    render?.cards?.live?.pct_drv ??
+    null;
 
   return (
     <div className="rounded-2xl border border-[var(--border)] bg-[var(--panel)] shadow-[0_0_0_1px_rgba(255,255,255,0.02)_inset] p-4">
@@ -145,7 +174,18 @@ export default function CoinPanel({
             <Metric label="GFM" value={pretty(gfmMain)} accent="violet" sub={gfmSub} />
             <Metric label="σ" value={pretty(render?.fm?.sigma)} accent="cyan" />
             <Metric label="|z|" value={pretty(render?.fm?.zAbs)} accent="pink" />
-            <Metric label="opening" value={pretty(openingVal)} accent="lime" />
+            <Metric
+              label="opening"
+              value={pretty(openingBench)}
+              accent="lime"
+              sub={
+                openingPct !== undefined && openingPct !== null ? (
+                  <div className="mt-0.5 text-[10px] leading-tight text-[var(--muted)]">
+                    {prettyPct(openingPct, 2)}%
+                  </div>
+                ) : undefined
+              }
+            />
           </div>
 
           {/* chart */}
@@ -153,7 +193,7 @@ export default function CoinPanel({
             {histogram}
           </div>
 
-          {/* MIN/MAX + Shifts + Opening card */}
+          {/* MIN/MAX + Shifts + Live market card */}
           <div className="grid grid-cols-3 gap-3 mb-3">
             <Card title="MIN / MAX" subtitle="price (session)">
               <div className="text-sm grid grid-cols-2 gap-x-3">
@@ -179,10 +219,15 @@ export default function CoinPanel({
               </div>
             </Card>
 
-            <Card title="Opening" subtitle="benchmark">
-              <div className="text-sm grid grid-cols-2 gap-x-3">
+            {/* NEW: live-market card (updates on every fetch) */}
+            <Card title="Live market" subtitle="benchmark · pct24h · pct_drv">
+              <div className="text-xs grid grid-cols-2 gap-x-3 leading-relaxed">
                 <div className="text-[var(--muted)]">benchmark</div>
-                <div className="tabular-nums">{pretty(openingVal)}</div>
+                <div className="tabular-nums">{pretty(liveBench)}</div>
+                <div className="text-[var(--muted)]">pct24h</div>
+                <div className="tabular-nums">{prettyPct(livePct24h, 2)}%</div>
+                <div className="text-[var(--muted)]">pct_drv</div>
+                <div className="tabular-nums">{prettyPct(livePctDrv, 4)}%</div>
               </div>
             </Card>
           </div>

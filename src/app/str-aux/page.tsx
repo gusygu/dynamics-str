@@ -38,6 +38,11 @@ type CoinOut = {
     gfm_calc_price?: number;  // GFMc
     gfm_price?: number;       // legacy fallback
   };
+  // NEW: cards for opening + live
+  cards?: {
+    opening?: { benchmark?: number; pct24h?: number };
+    live?: { benchmark?: number; pct24h?: number; pct_drv?: number };
+  };
   hist?: Hist;
   error?: string;
   [k: string]: any;
